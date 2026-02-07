@@ -1,0 +1,13 @@
+Version: 7
+EC level: L
+Mask: 2
+Size: 45x45
+Codewords: 196
+Erasure codewords: 0
+
+RS correction:
+  Block 0: 78+20 bytes, 4 errors, 0 erasures -> ok
+  Block 1: 78+20 bytes, 5 errors, 0 erasures -> ok
+
+Result:
+https://render.alipay.com/p/s/i?scheme=alipays%3A%2F%2Fplatformapi%2Fstartapp%3FappId%3D2021001192657766%26page%3Dpages%252FuserNoteList%252FuserNoteList
