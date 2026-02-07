@@ -1,0 +1,15 @@
+Version: 6
+EC level: M
+Mask: 0
+Size: 41x41
+Codewords: 172
+Erasure codewords: 10
+
+RS correction:
+  Block 0: 27+16 bytes, 5 errors, 2 erasures -> ok
+  Block 1: 27+16 bytes, 5 errors, 2 erasures -> ok
+  Block 2: 27+16 bytes, 4 errors, 4 erasures -> ok
+  Block 3: 27+16 bytes, 5 errors, 2 erasures -> ok
+
+Result:
+Warning of long airport queues under new EU border control system

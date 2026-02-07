@@ -1,0 +1,4 @@
+  Block 0: 27+16 bytes, 5 errors, 2 erasures -> ok
+  Block 1: 27+16 bytes, 5 errors, 2 erasures -> ok
+  Block 2: 27+16 bytes, 4 errors, 4 erasures -> ok
+  Block 3: 27+16 bytes, 5 errors, 2 erasures -> ok
