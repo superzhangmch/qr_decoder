@@ -22,7 +22,7 @@ from reed_solomon import ReedSolomon
 
 def find_finder_patterns(image):
     """
-    查找回字定位块
+    查找右下角之外的那三个“回”字定位块
     
     Find finder patterns with their corner points.
 
@@ -142,7 +142,10 @@ def identify_corners(patterns):
 
 
 def group_finder_patterns(patterns):
-    """Group finder patterns that belong to the same QR code.
+    """
+    从回字块中, 把每个合法 qr code 的三个, 聚一起
+    
+    Group finder patterns that belong to the same QR code.
 
     Returns list of (tl, tr, bl) tuples for each detected QR code.
     """
@@ -154,7 +157,9 @@ def group_finder_patterns(patterns):
                        (p1['center'][1]-p2['center'][1])**2)
 
     def is_valid_qr_geometry(p1, p2, p3):
-        """Check if 3 patterns form valid QR geometry (right angle at TL)."""
+        """
+        Check if 3 patterns form valid QR geometry (right angle at TL).
+        """
         centers = [p1['center'], p2['center'], p3['center']]
 
         # Find the pattern at the right angle (TL)
@@ -175,13 +180,13 @@ def group_finder_patterns(patterns):
             # Check that sides are similar length (within 3x ratio for perspective)
             ratio = max(len1, len2) / min(len1, len2)
 
-            if 60 < angle < 120 and ratio < 3:
+            if 60 < angle < 120 and ratio < 3: # 提取回字的中心构成的角, 角度 60~120; 两条边差距不过 3 倍
                 return True
         return False
 
     # Try all combinations of 3 patterns
     valid_groups = []
-    for combo in combinations(range(len(patterns)), 3):
+    for combo in combinations(range(len(patterns)), 3): # 对识别出的所有回字块, 排列组合出所有三元组, 看是否是一个 qr-code
         p1, p2, p3 = patterns[combo[0]], patterns[combo[1]], patterns[combo[2]]
         if is_valid_qr_geometry(p1, p2, p3):
             # Check that pattern sizes are similar (within 4x for perspective)
