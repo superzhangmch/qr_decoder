@@ -16,11 +16,17 @@
 
 <img src='test/111_debug/2_warped.png' height=500 width=1500 /> <br> 
 
+网格点对齐后: 
+<img src='test/111_debug/2b_grid.png' height=500 width=1500 /> <br> 
+
 各区块的分布, 以及 payload 怎么读取的(右下角开始, z 字形 + 耕牛式前进):
 
 <img src='test/111_debug/3_matrix.png' height=512 width=512/> <br>
 
 取 XOR 后, 就可以读数据了(数据残缺要用 ReedSolomon 算法来纠正): <br>
 <img src='test/111_debug/4_unmasked.png' height=512 width=512/> <br> 
+
+ReedSolomon 纠正(红色对勾):<br>
+<img src='test/111_debug/6_rs_corrections.png' height=512 width=512/> <br> 
  
 对于中心的 logo, 设法把它排除, 用 ReedSolomon 就足以把 mask的补回来.
