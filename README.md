@@ -23,3 +23,4 @@
 取 XOR 后, 就可以读数据了(数据残缺要用 ReedSolomon 算法来纠正): <br>
 <img src='test/111_debug/4_unmasked.png' height=512 width=512/> <br> 
  
+对于中心的 logo, 设法把它排除, 用 ReedSolomon 就足以把 mask的补回来.
