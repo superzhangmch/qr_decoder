@@ -8,7 +8,7 @@
 
 ----
 
-网上随便找一个 QR code, 中间步骤如下: 找共心圈套圈, 作为角块. 三个角块, 可以他们的相对位置, 以及并行边的扭曲情况, 可以推断出右下角.
+网上随便找一个 QR code, 中间步骤如下: 找共心圈套圈, 作为角块. 三个角块, 可以由他们的相对位置推断出右下角(三个角块各自的四个顶点，共 12 个图像坐标, 用来推断右下角)
 
 <img src='test/111_debug/1_detected.png' height=512/> <br>
 
@@ -20,6 +20,6 @@
 
 <img src='test/111_debug/3_matrix.png' height=512 width=512/> <br>
 
-取 XOR 后: <br>
+取 XOR 后, 就可以读数据了(数据残缺要用 ReedSolomon 算法来纠正): <br>
 <img src='test/111_debug/4_unmasked.png' height=512 width=512/> <br> 
  
