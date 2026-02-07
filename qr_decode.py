@@ -8,13 +8,10 @@ import cv2
 import numpy as np
 import os
 from typing import List, Tuple, Optional
-from itertools import combinations
-
 # Global debug output directory (None = disabled)
 DEBUG_DIR = None
 
 from reed_solomon import ReedSolomon
-
 from qr_detect import find_finder_patterns, identify_corners, group_finder_patterns, get_qr_corners
 
 # ============================================================================
@@ -47,9 +44,11 @@ def sample_matrix(image, corners, version, quick=False):
         m = (binary[coords_r][:, coords_c] < 128).astype(np.uint8)
         return m
 
+    # ==== 做网格对齐
+
     def score(m):
         s = np.sum(m[0:7, 0:7] == FINDER) + np.sum(m[0:7, size-7:size] == FINDER) + np.sum(m[size-7:size, 0:7] == FINDER)
-        for i in range(8, size-8):
+        for i in range(8, size-8): # 检查 timing pattern 是否黑白交替，判断采样是否对齐
             if m[6, i] == (1 if i % 2 == 0 else 0): s += 1
             if m[i, 6] == (1 if i % 2 == 0 else 0): s += 1
         return s
@@ -65,7 +64,10 @@ def sample_matrix(image, corners, version, quick=False):
                 if s > best_s: best, best_s, best_p = m, s, (ox, oy, ms)
 
     if quick:
+        print ("quick found")
         return best, None, None
+
+    print ("fine search")
 
     # Fine search
     ox, oy, ms = best_p
@@ -75,6 +77,8 @@ def sample_matrix(image, corners, version, quick=False):
                 m = sample(ox+dox, oy+doy, ms+dms)
                 s = score(m)
                 if s > best_s: best, best_s, best_p = m, s, (ox+dox, oy+doy, ms+dms)
+
+    # ====
 
     # Detect logo/erasure modules via color saturation
     erasure_mask = np.zeros((size, size), dtype=bool)
@@ -403,8 +407,10 @@ def try_decode_patterns(image, tl, tr, bl, patterns=None):
     try:
         # Estimate version
         dist = np.sqrt((tl['center'][0]-tr['center'][0])**2 + (tl['center'][1]-tr['center'][1])**2)
-        module_size = np.sqrt(tl['area']) / 7
-        version = max(1, min(40, round(((dist / module_size + 7) - 17) / 4)))
+        module_size = np.sqrt(tl['area']) / 7  # 单个小方块(像素)的大小. 一个回形block是 7x7 的
+        version0 = ((dist / module_size + 7) - 17) / 4
+        version = max(1, min(40, round(version0)))
+        print ("  version", version0, version, "module_size", module_size)
 
         corners = get_qr_corners(tl, tr, bl, version=version, image=image)
         matrix, erasure_mask, debug_imgs = sample_matrix(image, corners, version)
@@ -468,24 +474,20 @@ def decode_qr_multi(image_path, max_codes=3):
         for i in combo:
             used_patterns.add(i)
 
-    # Try all combinations, collect unique results
-    if len(patterns) >= 3:
-        for combo in combinations(range(len(patterns)), 3):
-            if len(results) >= max_codes:
-                break
-            if patterns_overlap(combo, used_patterns):
-                continue
+    # Try valid geometry groups
+    groups = group_finder_patterns(patterns)
+    for tl, tr, bl in groups:
+        if len(results) >= max_codes:
+            break
+        combo = (patterns.index(tl), patterns.index(tr), patterns.index(bl))
+        if patterns_overlap(combo, used_patterns):
+            continue
 
-            p1, p2, p3 = patterns[combo[0]], patterns[combo[1]], patterns[combo[2]]
-            try:
-                tl, tr, bl = identify_corners([p1, p2, p3])
-                success, result = try_decode_patterns(image, tl, tr, bl)
-                if success and result not in results:
-                    results.append(result)
-                    mark_used(combo)
-                    print(f"Decoded QR {len(results)} using patterns {combo}")
-            except:
-                continue
+        success, result = try_decode_patterns(image, tl, tr, bl)
+        if success and result not in results:
+            results.append(result)
+            mark_used(combo)
+            print(f"Decoded QR {len(results)} using patterns {combo}")
 
     if not results:
         raise ValueError("No QR codes could be decoded")
@@ -503,27 +505,17 @@ def decode_qr(image_path):
     patterns = find_finder_patterns(image)
     if len(patterns) < 3: raise ValueError(f"Found {len(patterns)} patterns, need at least 3")
 
-    # Try valid geometry groups first
+    # Try valid geometry groups
     groups = group_finder_patterns(patterns)
-
-    # If we have more than 3 patterns, try all combinations
-    if len(patterns) > 3:
-        for combo in combinations(range(len(patterns)), 3):
-            p1, p2, p3 = patterns[combo[0]], patterns[combo[1]], patterns[combo[2]]
-            try:
-                tl, tr, bl = identify_corners([p1, p2, p3])
-                success, result = try_decode_patterns(image, tl, tr, bl, patterns=patterns)
-                if success:
-                    print(f"Decoded using patterns {combo}")
-                    return result
-            except:
-                continue
-
-    # Try valid groups
+    try_cnt = 0
     for tl, tr, bl in groups:
         success, result = try_decode_patterns(image, tl, tr, bl, patterns=patterns)
+        try_cnt += 1
         if success:
+            print ("ok. try_cnt=", try_cnt)
             return result
+
+    # ======
 
     # Fallback: use first 3 patterns
     if len(patterns) >= 3:
