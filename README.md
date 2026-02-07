@@ -8,12 +8,18 @@
 
 ----
 
-网上随便找一个 QR code, 中间步骤如下: 
+网上随便找一个 QR code, 中间步骤如下: 找共心圈套圈, 作为角块. 三个角块, 可以他们的相对位置, 以及并行边的扭曲情况, 可以推断出右下角.
 
 <img src='test/111_debug/1_detected.png' height=512/> <br>
 
+定位出四个角后, 就可以把二维码还原成正方形了:
+
 <img src='test/111_debug/2_warped.png' height=500 width=1500 /> <br> 
-<img src='test/111_debug/3_matrix.png' height=512/> <br>
+
+各区块的分布, 以及 payload 怎么读取的(右下角开始, z 字形 + 耕牛式前进):
+
+<img src='test/111_debug/3_matrix.png' height=512 width=512/> <br>
+
 取 XOR 后: <br>
-<img src='test/111_debug/4_unmasked.png' height=512/> <br> 
+<img src='test/111_debug/4_unmasked.png' height=512 width=512/> <br> 
  
