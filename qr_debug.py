@@ -206,13 +206,88 @@ def save_debug_all(debug_dir, image, patterns, corners, warped_gray, warped_bina
 
     # RS correction details
     rs_lines = []
+    corrected_codewords = set()
+    corrected_bits = set()
     for b in rs_info:
+        if 'corrected_codewords' in b:
+            corrected_codewords = b['corrected_codewords']
+            corrected_bits = b.get('corrected_bits', set())
+            continue
         rs_lines.append(f"  Block {b['block']}: {b['data_len']}+{b['ec_len']} bytes, "
                         f"{b['errors']} errors, {b['erasures']} erasures -> {b['status']}")
     rs_text = '\n'.join(rs_lines)
     with open(os.path.join(debug_dir, f"{n}_rs.txt"), 'w') as f:
         f.write(rs_text + '\n')
     n += 1
+
+    # RS correction visualization: show corrected and erased modules
+    if corrected_bits or (erasure_cws and len(erasure_cws) > 0):
+        size = matrix.shape[0]
+        scale = 10
+        vis = ((1 - matrix) * 255).astype(np.uint8)
+        vis = cv2.resize(vis, (size*scale, size*scale), interpolation=cv2.INTER_NEAREST)
+        vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+
+        # Build bit index -> module position mapping
+        bit_modules = {}  # bit_idx -> (row, col)
+        codeword_modules = {}  # codeword_idx -> list of (row, col)
+        bit_idx = 0
+        col = size - 1
+        up = True
+        while col >= 0:
+            if col == 6:
+                col -= 1
+                continue
+            for row in (range(size-1, -1, -1) if up else range(size)):
+                if is_data_module(row, col, size):
+                    bit_modules[bit_idx] = (row, col)
+                    cw_idx = bit_idx // 8
+                    if cw_idx not in codeword_modules:
+                        codeword_modules[cw_idx] = []
+                    codeword_modules[cw_idx].append((row, col))
+                    bit_idx += 1
+                if col > 0 and is_data_module(row, col-1, size):
+                    bit_modules[bit_idx] = (row, col-1)
+                    cw_idx = bit_idx // 8
+                    if cw_idx not in codeword_modules:
+                        codeword_modules[cw_idx] = []
+                    codeword_modules[cw_idx].append((row, col-1))
+                    bit_idx += 1
+            col -= 2
+            up = not up
+
+        half = scale // 2
+        # Build set of erased bit indices
+        erased_bits = set()
+        if erasure_cws:
+            for cw_idx in erasure_cws:
+                for bit in range(8):
+                    erased_bits.add(cw_idx * 8 + bit)
+
+        # Draw each module with appropriate symbol
+        # X for erased, checkmark for corrected
+        s = scale // 3  # symbol size
+        for bit_idx, (r, c) in bit_modules.items():
+            is_erased = bit_idx in erased_bits
+            is_corrected = bit_idx in corrected_bits
+            cx, cy = c * scale + half, r * scale + half
+            if is_erased and is_corrected:
+                # Erased and corrected: blue X + red checkmark
+                cv2.line(vis, (cx - s, cy - s), (cx + s, cy + s), (255, 100, 0), 1)
+                cv2.line(vis, (cx - s, cy + s), (cx + s, cy - s), (255, 100, 0), 1)
+                cv2.line(vis, (cx - s, cy), (cx - s//2, cy + s), (0, 0, 255), 1)
+                cv2.line(vis, (cx - s//2, cy + s), (cx + s, cy - s), (0, 0, 255), 1)
+            elif is_corrected:
+                # Corrected only: red checkmark
+                cv2.line(vis, (cx - s, cy), (cx - s//2, cy + s), (0, 0, 255), 1)
+                cv2.line(vis, (cx - s//2, cy + s), (cx + s, cy - s), (0, 0, 255), 1)
+            elif is_erased:
+                # Erased only: blue X
+                cv2.line(vis, (cx - s, cy - s), (cx + s, cy + s), (255, 100, 0), 1)
+                cv2.line(vis, (cx - s, cy + s), (cx + s, cy - s), (255, 100, 0), 1)
+
+        _save_img(debug_dir, f"{n}_rs_corrections.png", vis)
+        n += 1
 
     # info + result
     size = version * 4 + 17

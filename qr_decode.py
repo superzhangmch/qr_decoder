@@ -37,6 +37,7 @@ def sample_matrix(image, corners, version, quick=False):
     FINDER = np.array([[1,1,1,1,1,1,1],[1,0,0,0,0,0,1],[1,0,1,1,1,0,1],[1,0,1,1,1,0,1],[1,0,1,1,1,0,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]], dtype=np.uint8)
 
     def sample(ox, oy, ms):
+        # 这里是取网格线围出的网格点的中间一点的值, 作为该格子的值
         coords_c = (ox + (np.arange(size) + 0.5) * ms).astype(int)
         coords_r = (oy + (np.arange(size) + 0.5) * ms).astype(int)
         coords_c = np.clip(coords_c, 0, warp_size-1)
@@ -308,17 +309,22 @@ def decode_with_rs(codewords, version, ec_level, erasure_codewords=None):
     idx, max_data, ec_len = 0, max(b[0] for b in blocks), blocks[0][1] - blocks[0][0]
     # Track global codeword index -> (block_idx, position_in_block) for erasure mapping
     global_to_block = {}
+    block_to_global = {}  # (block_idx, position) -> global_idx
     for col in range(max_data):
         for i, (data_len, _) in enumerate(blocks):
             if col < data_len and idx < len(codewords):
                 block_data[i].append(codewords[idx])
-                global_to_block[idx] = (i, len(block_data[i]) - 1)
+                pos = len(block_data[i]) - 1
+                global_to_block[idx] = (i, pos)
+                block_to_global[(i, pos)] = idx
                 idx += 1
     for col in range(ec_len):
         for i in range(len(blocks)):
             if idx < len(codewords):
                 block_ec[i].append(codewords[idx])
-                global_to_block[idx] = (i, blocks[i][0] + len(block_ec[i]) - 1)
+                pos = blocks[i][0] + len(block_ec[i]) - 1
+                global_to_block[idx] = (i, pos)
+                block_to_global[(i, pos)] = idx
                 idx += 1
 
     # Build per-block erasure positions
@@ -331,11 +337,23 @@ def decode_with_rs(codewords, version, ec_level, erasure_codewords=None):
 
     rs, data = ReedSolomon(ec_len), []
     rs_info = []  # per-block RS correction details
+    corrected_codewords = set()  # global indices of corrected codewords
+    corrected_bits = set()  # global bit indices that were corrected
     for i in range(len(blocks)):
         raw = block_data[i] + block_ec[i]
         try:
             erasures = block_erasures[i] if block_erasures[i] else None
             corrected = rs.decode(raw, erasure_pos=erasures)
+            # Find which codewords and bits were corrected (only data part)
+            for pos, (orig, corr) in enumerate(zip(raw[:blocks[i][0]], corrected)):
+                if orig != corr and (i, pos) in block_to_global:
+                    global_cw_idx = block_to_global[(i, pos)]
+                    corrected_codewords.add(global_cw_idx)
+                    # Find which bits differ
+                    diff = orig ^ corr
+                    for bit in range(8):
+                        if diff & (1 << (7 - bit)):
+                            corrected_bits.add(global_cw_idx * 8 + bit)
             errors = sum(a != b for a, b in zip(raw[:blocks[i][0]], corrected))
             rs_info.append({'block': i, 'data_len': blocks[i][0], 'ec_len': ec_len,
                             'errors': errors, 'erasures': len(erasures) if erasures else 0,
@@ -346,6 +364,8 @@ def decode_with_rs(codewords, version, ec_level, erasure_codewords=None):
                             'errors': '?', 'erasures': len(block_erasures[i]),
                             'status': f'failed: {e}'})
             data.extend(block_data[i])
+
+    rs_info.append({'corrected_codewords': corrected_codewords, 'corrected_bits': corrected_bits})
 
     bits = [((byte >> (7-i)) & 1) for byte in data for i in range(8)]
 
@@ -457,6 +477,12 @@ def try_decode_patterns(image, tl, tr, bl, patterns=None):
         erasure_cws = get_codeword_erasures(size, erasure_mask)
 
         result, rs_info = decode_with_rs(codewords, version, ec_level, erasure_codewords=erasure_cws)
+
+        # Print RS correction summary
+        total_errors = sum(b['errors'] for b in rs_info if 'errors' in b and b['errors'] != '?')
+        total_erasures = sum(b['erasures'] for b in rs_info if 'erasures' in b)
+        failed_blocks = sum(1 for b in rs_info if 'status' in b and b['status'] != 'ok')
+        print(f"  RS correction: {total_errors} errors, {total_erasures} erasures, {failed_blocks} failed blocks")
 
         # Validate result (should be printable text)
         if result and len(result) > 0 and not result.startswith('[Mode'):
@@ -582,6 +608,13 @@ def decode_qr(image_path):
     erasure_cws = get_codeword_erasures(size, erasure_mask)
 
     result, rs_info = decode_with_rs(codewords, version, ec_level, erasure_codewords=erasure_cws)
+
+    # Print RS correction summary
+    total_errors = sum(b['errors'] for b in rs_info if 'errors' in b and b['errors'] != '?')
+    total_erasures = sum(b['erasures'] for b in rs_info if 'erasures' in b)
+    failed_blocks = sum(1 for b in rs_info if 'status' in b and b['status'] != 'ok')
+    print(f"  RS correction: {total_errors} errors, {total_erasures} erasures, {failed_blocks} failed blocks")
+
     if debug_imgs:
         from qr_debug import save_debug_all
         save_debug_all(DEBUG_DIR, image, patterns, corners,
