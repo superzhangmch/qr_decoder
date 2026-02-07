@@ -4,7 +4,7 @@
 
 单纯为学习 QR 解码怎么做. ai 的解法不一定和实际的一样, 但是鉴于大体可工作, 所以可认为这就是典型的做法.
 
-怎么解码: 见 https://github.com/superzhangmch/qr_decoder/blob/main/qr_decode_explained.md 
+怎么解码 qr_decode.py. 原理见 https://github.com/superzhangmch/qr_decoder/blob/main/qr_decode_explained.md 
 
 ----
 
