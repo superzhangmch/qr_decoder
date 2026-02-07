@@ -21,7 +21,10 @@ from reed_solomon import ReedSolomon
 # ============================================================================
 
 def find_finder_patterns(image):
-    """Find finder patterns with their corner points.
+    """
+    查找回字定位块
+    
+    Find finder patterns with their corner points.
 
     A finder pattern has a specific 1:1:3:1:1 ratio structure.
     """
@@ -66,6 +69,8 @@ def find_finder_patterns(image):
     def count_children(idx):
         """Count nested children (depth)."""
         depth = 0
+
+        # 注意: hierarchy.shape = (N, 4),  4 = [next, prev, first_child, parent], hierarchy 衡量来轮廓的包含关系. 所以下面几句能得到 square 的嵌套层数
         child = hierarchy[idx][2]  # First child
         while child != -1:
             depth += 1
@@ -88,7 +93,7 @@ def find_finder_patterns(image):
             'idx': i
         })
 
-    # Group concentric squares (same center, different sizes)
+    # Group concentric squares (same center, different sizes). 聚合同心的方框轮廓线
     patterns = []
     used = set()
     for i, c1 in enumerate(candidates):
