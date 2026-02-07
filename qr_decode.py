@@ -104,7 +104,30 @@ def sample_matrix(image, corners, version, quick=False):
             if high_count >= bbox_area * 0.15:  # At least 15% density within bbox
                 erasure_mask[r_min:r_max+1, c_min:c_max+1] = True
 
-    debug_imgs = (warped, binary, warped_color) if DEBUG_DIR and not quick else None
+    # Debug: draw grid lines and sample points on warped image
+    warped_grid = None
+    if DEBUG_DIR and not quick and warped_color is not None:
+        ox, oy, ms = best_p
+        warped_grid = warped_color.copy()
+        # Draw vertical grid lines
+        for i in range(size + 1):
+            x = int(ox + i * ms)
+            if 0 <= x < warp_size:
+                cv2.line(warped_grid, (x, 0), (x, warp_size - 1), (0, 0, 255), 1)
+        # Draw horizontal grid lines
+        for i in range(size + 1):
+            y = int(oy + i * ms)
+            if 0 <= y < warp_size:
+                cv2.line(warped_grid, (0, y), (warp_size - 1, y), (0, 0, 255), 1)
+        # Draw sample points (center of each module)
+        for r in range(size):
+            y = int(oy + (r + 0.5) * ms)
+            for c in range(size):
+                x = int(ox + (c + 0.5) * ms)
+                if 0 <= x < warp_size and 0 <= y < warp_size:
+                    warped_grid[y, x] = (0, 0, 255)
+
+    debug_imgs = (warped, binary, warped_color, warped_grid) if DEBUG_DIR and not quick else None
     return best, erasure_mask, debug_imgs
 
 
@@ -440,7 +463,7 @@ def try_decode_patterns(image, tl, tr, bl, patterns=None):
             if debug_imgs:
                 from qr_debug import save_debug_all
                 save_debug_all(DEBUG_DIR, image, patterns or [tl, tr, bl], corners,
-                               debug_imgs[0], debug_imgs[1], debug_imgs[2],
+                               debug_imgs[0], debug_imgs[1], debug_imgs[2], debug_imgs[3],
                                matrix, erasure_mask, unmasked, version, ec_name, mask,
                                codewords, erasure_cws, rs_info, result, is_data_module)
             return True, result
@@ -562,7 +585,7 @@ def decode_qr(image_path):
     if debug_imgs:
         from qr_debug import save_debug_all
         save_debug_all(DEBUG_DIR, image, patterns, corners,
-                       debug_imgs[0], debug_imgs[1], debug_imgs[2],
+                       debug_imgs[0], debug_imgs[1], debug_imgs[2], debug_imgs[3],
                        matrix, erasure_mask, unmasked, version, ec_name, mask,
                        codewords, erasure_cws, rs_info, result, is_data_module)
     return result

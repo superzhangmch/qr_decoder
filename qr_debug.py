@@ -148,7 +148,7 @@ def _draw_colored_matrix(matrix, version, is_data_module):
     return vis
 
 
-def save_debug_all(debug_dir, image, patterns, corners, warped_gray, warped_binary, warped_color,
+def save_debug_all(debug_dir, image, patterns, corners, warped_gray, warped_binary, warped_color, warped_grid,
                    matrix, erasure_mask, unmasked, version, ec_name, mask, codewords,
                    erasure_cws, rs_info, result, is_data_module):
     """Save all intermediate results to debug_dir."""
@@ -179,6 +179,10 @@ def save_debug_all(debug_dir, image, patterns, corners, warped_gray, warped_bina
     bin3 = cv2.cvtColor(warped_binary, cv2.COLOR_GRAY2BGR)
     panels = [gray3, bin3] + ([warped_color] if warped_color is not None else [])
     _save_img(debug_dir, "2_warped.png", np.hstack(panels))
+
+    # 2b: warped with grid lines
+    if warped_grid is not None:
+        _save_img(debug_dir, "2b_grid.png", warped_grid)
 
     # 3: sampled matrix with color-coded function regions
     _save_img(debug_dir, "3_matrix.png", _draw_colored_matrix(matrix, version, is_data_module))
