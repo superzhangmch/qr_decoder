@@ -68,7 +68,7 @@ def sample_matrix(image, corners, version, quick=False):
         print ("quick found")
         return best, None, None
 
-    print ("fine search")
+    print ("  fine search")
 
     # Fine search
     ox, oy, ms = best_p
@@ -102,7 +102,7 @@ def sample_matrix(image, corners, version, quick=False):
             c_min, c_max = cols.min(), cols.max()
             # Only fill bounding box if it's compact (logo-shaped, not scattered)
             bbox_area = (r_max - r_min + 1) * (c_max - c_min + 1)
-            if high_count >= bbox_area * 0.15:  # At least 15% density within bbox
+            if high_count >= bbox_area * 0.15 and bbox_area < size * size * 0.4:
                 erasure_mask[r_min:r_max+1, c_min:c_max+1] = True
 
     # Debug: draw grid lines and sample points on warped image
@@ -514,28 +514,26 @@ def decode_qr_multi(image_path, max_codes=3):
     results = []
     used_patterns = set()  # Track which patterns have been used
 
-    def patterns_overlap(combo, used):
-        """Check if any pattern in combo was already used."""
-        return any(i in used for i in combo)
-
-    def mark_used(combo):
-        """Mark patterns as used."""
-        for i in combo:
-            used_patterns.add(i)
+    def find_index(pat):
+        """Find pattern index by identity (not ==, which fails on numpy arrays)."""
+        for i, p in enumerate(patterns):
+            if p is pat:
+                return i
+        return -1
 
     # Try valid geometry groups
     groups = group_finder_patterns(patterns)
     for tl, tr, bl in groups:
         if len(results) >= max_codes:
             break
-        combo = (patterns.index(tl), patterns.index(tr), patterns.index(bl))
-        if patterns_overlap(combo, used_patterns):
+        combo = (find_index(tl), find_index(tr), find_index(bl))
+        if any(i in used_patterns for i in combo):
             continue
 
         success, result = try_decode_patterns(image, tl, tr, bl)
-        if success and result not in results:
+        if success:
             results.append(result)
-            mark_used(combo)
+            used_patterns.update(combo)
             print(f"Decoded QR {len(results)} using patterns {combo}")
 
     if not results:
@@ -637,6 +635,9 @@ if __name__ == "__main__":
         print(f"Debug output -> {DEBUG_DIR}/")
 
     try:
-        print(decode_qr(path))
+        if '--multi' in flags:
+            print(decode_qr_multi(path))
+        else:
+            print(decode_qr(path))
     except Exception as e:
         print(f"Error: {e}")
