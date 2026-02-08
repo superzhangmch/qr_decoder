@@ -13,6 +13,67 @@ from itertools import combinations
 # QR DETECTION
 # ============================================================================
 
+AP_POSITIONS = {
+    2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],8:[6,24,42],9:[6,26,46],10:[6,28,50],
+    11:[6,30,54],12:[6,32,58],13:[6,34,62],14:[6,26,46,66],15:[6,26,48,70],16:[6,26,50,74],
+    17:[6,30,54,78],18:[6,30,56,82],19:[6,30,58,86],20:[6,34,62,90],21:[6,28,50,72,94],
+    22:[6,26,50,74,98],23:[6,30,54,78,102],24:[6,28,54,80,106],25:[6,32,58,84,110],
+    26:[6,30,58,86,114],27:[6,34,62,90,118],28:[6,26,50,74,98,122],29:[6,30,54,78,102,126],
+    30:[6,26,52,78,104,130],31:[6,30,56,82,108,134],32:[6,34,60,86,112,138],
+    33:[6,30,58,86,114,142],34:[6,34,62,90,118,146],35:[6,30,54,78,102,126,150],
+    36:[6,24,50,76,102,128,154],37:[6,28,54,80,106,132,158],38:[6,32,58,84,110,136,162],
+    39:[6,26,54,82,110,138,166],40:[6,30,58,86,114,142,170]
+}
+
+
+def _find_alignment_center(gray, predicted_pos, module_size):
+    """Search for alignment pattern center near predicted position.
+
+    Builds a synthetic 5x5 alignment template scaled to module_size,
+    runs template matching in a local window, returns refined center or None.
+    """
+    ms = max(3, int(round(module_size)))
+    # Build synthetic alignment pattern: 5x5 modules (black-white-black rings)
+    tpl_size = ms * 5
+    tpl = np.ones((tpl_size, tpl_size), dtype=np.uint8) * 255
+    # Outer black ring (5x5)
+    tpl[0:tpl_size, 0:tpl_size] = 0
+    # White ring (3x3 modules)
+    tpl[ms:ms*4, ms:ms*4] = 255
+    # Center black (1x1 module)
+    tpl[ms*2:ms*3, ms*2:ms*3] = 0
+
+    px, py = int(round(predicted_pos[0])), int(round(predicted_pos[1]))
+    h, w = gray.shape[:2]
+    radius = int(ms * 5)
+    x0 = max(0, px - radius)
+    y0 = max(0, py - radius)
+    x1 = min(w, px + radius)
+    y1 = min(h, py + radius)
+
+    roi = gray[y0:y1, x0:x1]
+    if roi.shape[0] < tpl_size or roi.shape[1] < tpl_size:
+        return None
+
+    result = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+    if max_val < 0.5:
+        return None
+
+    # max_loc is top-left of template match; center is offset by half template
+    cx = x0 + max_loc[0] + tpl_size / 2.0
+    cy = y0 + max_loc[1] + tpl_size / 2.0
+
+    # Subpixel refinement
+    corner = np.array([[[cx, cy]]], dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
+    try:
+        refined = cv2.cornerSubPix(gray, corner, (ms, ms), (-1, -1), criteria)
+        return (float(refined[0][0][0]), float(refined[0][0][1]))
+    except:
+        return (cx, cy)
+
 def find_finder_patterns(image):
     """
     查找右下角之外的那三个“回”字定位块
@@ -254,6 +315,26 @@ def get_qr_corners(tl, tr, bl, version=None, image=None):
         H, mask = cv2.findHomography(mod_pts, img_pts, cv2.RANSAC, 3.0)
 
         if H is not None:
+            # Try to refine with bottom-right alignment pattern (version >= 2)
+            if version >= 2 and image is not None and version in AP_POSITIONS:
+                positions = AP_POSITIONS[version]
+                # BR alignment center in module coords
+                ap_mod = np.array([[[float(positions[-1]), float(positions[-1])]]], dtype=np.float32)
+                ap_img_pred = cv2.perspectiveTransform(ap_mod, H)
+                pred_x, pred_y = float(ap_img_pred[0][0][0]), float(ap_img_pred[0][0][1])
+
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+                module_size = np.sqrt(tl['area']) / 7.0
+                ap_center = _find_alignment_center(gray, (pred_x, pred_y), module_size)
+
+                if ap_center is not None:
+                    # Add alignment center as extra correspondence and recompute
+                    img_pts2 = np.vstack([img_pts, [[ap_center[0], ap_center[1]]]])
+                    mod_pts2 = np.vstack([mod_pts, [[float(positions[-1]), float(positions[-1])]]])
+                    H2, _ = cv2.findHomography(mod_pts2, img_pts2, cv2.RANSAC, 3.0)
+                    if H2 is not None:
+                        H = H2
+
             # Project QR outer corners
             outer_mod = np.array([[[0, 0]], [[size, 0]], [[size, size]], [[0, size]]], dtype=np.float32)
             outer_img = cv2.perspectiveTransform(outer_mod, H)

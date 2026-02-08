@@ -22,7 +22,7 @@ def sample_matrix(image, corners, version, quick=False):
     """Sample QR matrix with optimal alignment."""
     size, warp_size = version * 4 + 17, (version * 4 + 17) * 10
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-    dst = np.array([[0,0], [warp_size-1,0], [warp_size-1,warp_size-1], [0,warp_size-1]], dtype=np.float32)
+    dst = np.array([[0,0], [warp_size,0], [warp_size,warp_size], [0,warp_size]], dtype=np.float32)
     M = cv2.getPerspectiveTransform(corners, dst)
     warped = cv2.warpPerspective(gray, M, (warp_size, warp_size))
     _, binary = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -56,12 +56,18 @@ def sample_matrix(image, corners, version, quick=False):
 
     # Quick mode for version detection
     step = 1.0 if quick else 0.5
-    best, best_s, best_p = None, 0, (0, 0, 10.0)
+    ideal_ms = warp_size / size
+    best, best_s, best_p = None, -1, (0, 0, ideal_ms)
+
+    def penalty(ox, oy, ms):
+        """Small penalty for deviation from ideal grid, to break ties."""
+        return (abs(ox) + abs(oy) + abs(ms - ideal_ms) * 10) * 0.001
+
     for ox in np.arange(-5, 5, step):
         for oy in np.arange(-5, 5, step):
             for ms in np.arange(9.6, 10.4, 0.2 if quick else 0.1):
                 m = sample(ox, oy, ms)
-                s = score(m)
+                s = score(m) - penalty(ox, oy, ms)
                 if s > best_s: best, best_s, best_p = m, s, (ox, oy, ms)
 
     if quick:
@@ -76,7 +82,7 @@ def sample_matrix(image, corners, version, quick=False):
         for doy in np.arange(-0.5, 0.6, 0.2):
             for dms in np.arange(-0.15, 0.2, 0.05):
                 m = sample(ox+dox, oy+doy, ms+dms)
-                s = score(m)
+                s = score(m) - penalty(ox+dox, oy+doy, ms+dms)
                 if s > best_s: best, best_s, best_p = m, s, (ox+dox, oy+doy, ms+dms)
 
     # ====
