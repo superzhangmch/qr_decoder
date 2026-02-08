@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>QR Decoder</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#1a1a2e;color:#eee;
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:16px}
+h1{font-size:22px;margin-bottom:12px;color:#e94560}
+#video-wrap{position:relative;width:100%;max-width:640px;background:#16213e;border-radius:12px;overflow:hidden}
+video{width:100%;display:block}
+canvas{display:none}
+.controls{display:flex;gap:12px;margin:14px 0;flex-wrap:wrap;justify-content:center}
+button{padding:12px 32px;font-size:17px;border:none;border-radius:8px;background:#0f3460;color:#eee;cursor:pointer}
+button:hover{background:#533483}
+button:disabled{opacity:.4;cursor:not-allowed}
+.file-label{padding:12px 20px;font-size:15px;border:2px dashed #0f3460;border-radius:8px;cursor:pointer;color:#aaa}
+.file-label:hover{border-color:#533483;color:#eee}
+input[type=file]{display:none}
+#status{margin:6px 0;font-size:14px;color:#aaa;text-align:center}
+#result-box{width:100%;max-width:640px;margin-top:10px;display:none}
+#result{padding:14px;background:#16213e;border-radius:8px;word-break:break-all;font-size:15px;line-height:1.5}
+#result a{color:#e94560}
+#copy-btn{margin-top:8px;padding:6px 16px;font-size:13px;background:#0f3460;border:none;border-radius:6px;color:#aaa;cursor:pointer}
+#copy-btn:hover{color:#eee}
+</style>
+</head>
+<body>
+<h1>QR Decoder</h1>
+<div id="video-wrap"><video id="video" playsinline autoplay muted></video></div>
+<canvas id="canvas"></canvas>
+<div class="controls">
+  <button id="scanBtn" disabled onclick="scan()">Scan</button>
+  <label class="file-label">Upload<input type="file" accept="image/*" onchange="handleFile(event)"></label>
+</div>
+<div id="status">Loading OpenCV.js...</div>
+<div id="result-box">
+  <div id="result"></div>
+  <button id="copy-btn" onclick="copyResult()">Copy</button>
+</div>
+
+<script>var Module={onRuntimeInitialized:function(){cvReady=true;
+  document.getElementById('status').textContent='Ready - point camera at QR code';
+  document.getElementById('scanBtn').disabled=false;}};</script>
+<script async src="https://docs.opencv.org/4.9.0/opencv.js"></script>
+<script>
+"use strict";
+let cvReady = false;
+
+// ========== GF(2^8) ==========
+class GF {
+  constructor() {
+    this.exp = new Uint16Array(512);
+    this.log = new Uint16Array(256);
+    let x = 1;
+    for (let i = 0; i < 255; i++) {
+      this.exp[i] = x; this.log[x] = i;
+      x = x & 0x80 ? ((x << 1) ^ 0x11D) : (x << 1);
+    }
+    for (let i = 255; i < 512; i++) this.exp[i] = this.exp[i - 255];
+  }
+  mul(a, b) { return a === 0 || b === 0 ? 0 : this.exp[this.log[a] + this.log[b]]; }
+  div(a, b) { return a === 0 ? 0 : this.exp[(this.log[a] - this.log[b] + 255) % 255]; }
+  inv(a) { return this.exp[255 - this.log[a]]; }
+}
+
+// ========== Reed-Solomon ==========
+class ReedSolomon {
+  constructor(nsym) { this.nsym = nsym; this.gf = new GF(); }
+
+  _polyMul(p1, p2) {
+    const r = new Array(p1.length + p2.length - 1).fill(0);
+    for (let i = 0; i < p1.length; i++)
+      for (let j = 0; j < p2.length; j++)
+        r[i + j] ^= this.gf.mul(p1[i], p2[j]);
+    return r;
+  }
+  _polyEval(p, x) { let r = 0; for (const c of p) r = this.gf.mul(r, x) ^ c; return r; }
+  _syndromes(msg) { return Array.from({length: this.nsym}, (_, i) => this._polyEval(msg, this.gf.exp[i])); }
+
+  _berlekampMassey(S) {
+    let C = [1], B = [1], L = 0, m = 1, b = 1;
+    for (let ni = 0; ni < S.length; ni++) {
+      let d = S[ni];
+      for (let i = 1; i <= L && i < C.length; i++) d ^= this.gf.mul(C[i], S[ni - i]);
+      if (d === 0) { m++; }
+      else if (2 * L <= ni) {
+        const T = [...C];
+        while (C.length < B.length + m) C.push(0);
+        for (let i = 0; i < B.length; i++) C[i + m] ^= this.gf.mul(this.gf.div(d, b), B[i]);
+        L = ni + 1 - L; B = T; b = d; m = 1;
+      } else {
+        while (C.length < B.length + m) C.push(0);
+        for (let i = 0; i < B.length; i++) C[i + m] ^= this.gf.mul(this.gf.div(d, b), B[i]);
+        m++;
+      }
+    }
+    return C;
+  }
+
+  _forneySyndromes(S, epos, n) {
+    const f = [...S];
+    for (const p of epos) {
+      const x = this.gf.exp[n - 1 - p];
+      for (let i = 0; i < f.length - 1; i++) f[i] = this.gf.mul(f[i], x) ^ f[i + 1];
+    }
+    return epos.length ? f.slice(0, -epos.length) : f;
+  }
+
+  _findErrors(loc, n) {
+    const r = [];
+    for (let i = 0; i < n; i++) if (this._polyEval(loc, this.gf.exp[i]) === 0) r.push(n - 1 - i);
+    return r;
+  }
+
+  _correct(msg, synd, pos) {
+    if (!pos.length) return [...msg];
+    let eLoc = [1];
+    for (const p of pos) eLoc = this._polyMul(eLoc, [this.gf.exp[msg.length - 1 - p], 1]);
+    const omega = this._polyMul([...synd].reverse(), eLoc).slice(-this.nsym);
+    const n = eLoc.length - 1;
+    const deriv = []; for (let i = 0; i < n; i++) deriv.push((n - i) % 2 === 1 ? eLoc[i] : 0);
+    if (!deriv.length) deriv.push(0);
+    const res = [...msg];
+    for (const p of pos) {
+      const Xi = this.gf.exp[msg.length - 1 - p];
+      const d = this._polyEval(deriv, this.gf.inv(Xi));
+      if (d !== 0) res[p] ^= this.gf.mul(Xi, this.gf.div(this._polyEval(omega, this.gf.inv(Xi)), d));
+    }
+    return res;
+  }
+
+  decode(msg, erasurePos) {
+    erasurePos = erasurePos || [];
+    const synd = this._syndromes(msg);
+    if (Math.max(...synd) === 0) return msg.slice(0, -this.nsym);
+    if (erasurePos.length) {
+      if (erasurePos.length > this.nsym) throw new Error("Too many erasures");
+      const fs = this._forneySyndromes(synd, erasurePos, msg.length);
+      const el = fs.length ? this._berlekampMassey(fs) : [1];
+      if (2 * (el.length - 1) + erasurePos.length > this.nsym) throw new Error("Too many errors+erasures");
+      const ep = el.length > 1 ? this._findErrors(el, msg.length) : [];
+      const all = [...new Set([...erasurePos, ...ep])];
+      const c = this._correct(msg, synd, all);
+      if (Math.max(...this._syndromes(c)) !== 0) throw new Error("Correction failed");
+      return c.slice(0, -this.nsym);
+    }
+    const el = this._berlekampMassey(synd);
+    if (el.length - 1 > Math.floor(this.nsym / 2)) throw new Error("Too many errors");
+    const all = this._findErrors(el, msg.length);
+    if (all.length !== el.length - 1) throw new Error("Cannot locate errors");
+    const c = this._correct(msg, synd, all);
+    if (Math.max(...this._syndromes(c)) !== 0) throw new Error("Correction failed");
+    return c.slice(0, -this.nsym);
+  }
+}
+
+// ========== Data Tables ==========
+const AP_POS = {
+  2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],8:[6,24,42],9:[6,26,46],10:[6,28,50],
+  11:[6,30,54],12:[6,32,58],13:[6,34,62],14:[6,26,46,66],15:[6,26,48,70],16:[6,26,50,74],
+  17:[6,30,54,78],18:[6,30,56,82],19:[6,30,58,86],20:[6,34,62,90],21:[6,28,50,72,94],
+  22:[6,26,50,74,98],23:[6,30,54,78,102],24:[6,28,54,80,106],25:[6,32,58,84,110],
+  26:[6,30,58,86,114],27:[6,34,62,90,118],28:[6,26,50,74,98,122],29:[6,30,54,78,102,126],
+  30:[6,26,52,78,104,130],31:[6,30,56,82,108,134],32:[6,34,60,86,112,138],
+  33:[6,30,58,86,114,142],34:[6,34,62,90,118,146],35:[6,30,54,78,102,126,150],
+  36:[6,24,50,76,102,128,154],37:[6,28,54,80,106,132,158],38:[6,32,58,84,110,136,162],
+  39:[6,26,54,82,110,138,166],40:[6,30,58,86,114,142,170]
+};
+
+function mkB(d1,t1,c1,d2,t2,c2){const r=[];for(let i=0;i<c1;i++)r.push([d1,t1]);if(c2)for(let i=0;i<c2;i++)r.push([d2,t2]);return r;}
+const BLOCKS = {
+'1,0':mkB(19,26,1),'1,1':mkB(16,26,1),'1,2':mkB(13,26,1),'1,3':mkB(9,26,1),
+'2,0':mkB(34,44,1),'2,1':mkB(28,44,1),'2,2':mkB(22,44,1),'2,3':mkB(16,44,1),
+'3,0':mkB(55,70,1),'3,1':mkB(44,70,1),'3,2':mkB(17,35,2),'3,3':mkB(13,35,2),
+'4,0':mkB(80,100,1),'4,1':mkB(32,50,2),'4,2':mkB(24,50,2),'4,3':mkB(9,25,4),
+'5,0':mkB(108,134,1),'5,1':mkB(43,67,2),'5,2':mkB(11,33,2,12,34,2),'5,3':mkB(11,33,2,12,34,2),
+'6,0':mkB(68,86,2),'6,1':mkB(27,43,4),'6,2':mkB(15,36,4),'6,3':mkB(15,36,4),
+'7,0':mkB(78,98,2),'7,1':mkB(19,44,4),'7,2':mkB(13,32,2,14,33,4),'7,3':mkB(13,32,4,14,33,1),
+'8,0':mkB(97,121,2),'8,1':mkB(22,44,2,23,45,2),'8,2':mkB(14,33,4,15,34,2),'8,3':mkB(12,30,4,13,31,2),
+'9,0':mkB(116,146,2),'9,1':mkB(22,44,3,23,45,2),'9,2':mkB(12,30,4,13,31,4),'9,3':mkB(11,28,4,12,29,4),
+'10,0':mkB(68,86,2,69,87,2),'10,1':mkB(26,54,4,27,55,1),'10,2':mkB(15,36,6,16,37,2),'10,3':mkB(12,30,6,13,31,2),
+'11,0':mkB(81,101,4),'11,1':mkB(30,58,1,31,59,4),'11,2':mkB(12,30,4,13,31,4),'11,3':mkB(12,30,3,13,31,8),
+'12,0':mkB(92,116,2,93,117,2),'12,1':mkB(22,44,6,23,45,2),'12,2':mkB(14,34,4,15,35,6),'12,3':mkB(11,28,7,12,29,4),
+'13,0':mkB(107,133,4),'13,1':mkB(33,63,8,34,64,1),'13,2':mkB(16,38,8,17,39,4),'13,3':mkB(12,30,12,13,31,4),
+'14,0':mkB(115,145,3,116,146,1),'14,1':mkB(36,68,4,37,69,5),'14,2':mkB(12,30,11,13,31,5),'14,3':mkB(11,28,11,12,29,5),
+'15,0':mkB(87,109,5,88,110,1),'15,1':mkB(36,68,5,37,69,5),'15,2':mkB(12,30,5,13,31,7),'15,3':mkB(12,30,11,13,31,7),
+'16,0':mkB(98,122,5,99,123,1),'16,1':mkB(45,85,7,46,86,3),'16,2':mkB(14,34,15,15,35,2),'16,3':mkB(12,30,3,13,31,13),
+'17,0':mkB(107,135,1,108,136,5),'17,1':mkB(46,86,10,47,87,1),'17,2':mkB(14,34,1,15,35,15),'17,3':mkB(11,28,2,12,29,17),
+'18,0':mkB(120,150,5,121,151,1),'18,1':mkB(43,81,9,44,82,4),'18,2':mkB(14,34,17,15,35,1),'18,3':mkB(11,28,2,12,29,19),
+'19,0':mkB(113,141,3,114,142,4),'19,1':mkB(44,82,3,45,83,11),'19,2':mkB(14,34,17,15,35,4),'19,3':mkB(13,32,9,14,33,16),
+'20,0':mkB(107,135,3,108,136,5),'20,1':mkB(41,77,3,42,78,13),'20,2':mkB(13,32,15,14,33,5),'20,3':mkB(12,30,15,13,31,10),
+'21,0':mkB(116,144,4,117,145,4),'21,1':mkB(42,78,17),'21,2':mkB(15,36,17,16,37,6),'21,3':mkB(12,30,19,13,31,6),
+'22,0':mkB(111,139,2,112,140,7),'22,1':mkB(46,86,17),'22,2':mkB(14,34,7,15,35,16),'22,3':mkB(13,32,34),
+'23,0':mkB(121,151,4,122,152,5),'23,1':mkB(47,87,4,48,88,14),'23,2':mkB(14,34,11,15,35,14),'23,3':mkB(13,32,16,14,33,14),
+'24,0':mkB(117,147,6,118,148,4),'24,1':mkB(45,85,6,46,86,14),'24,2':mkB(14,34,11,15,35,16),'24,3':mkB(12,30,30,13,31,2),
+'25,0':mkB(106,132,8,107,133,4),'25,1':mkB(47,87,8,48,88,13),'25,2':mkB(14,34,7,15,35,22),'25,3':mkB(12,30,22,13,31,13),
+'26,0':mkB(114,142,10,115,143,2),'26,1':mkB(46,86,19,47,87,4),'26,2':mkB(15,36,28,16,37,6),'26,3':mkB(13,32,33,14,33,4),
+'27,0':mkB(122,152,8,123,153,4),'27,1':mkB(45,85,22,46,86,3),'27,2':mkB(15,36,8,16,37,26),'27,3':mkB(12,30,12,13,31,28),
+'28,0':mkB(117,147,3,118,148,10),'28,1':mkB(45,85,3,46,86,23),'28,2':mkB(15,36,4,16,37,31),'28,3':mkB(13,32,11,14,33,31),
+'29,0':mkB(116,146,7,117,147,7),'29,1':mkB(45,85,21,46,86,7),'29,2':mkB(13,32,1,14,33,37),'29,3':mkB(12,30,19,13,31,26),
+'30,0':mkB(115,145,5,116,146,10),'30,1':mkB(47,87,19,48,88,10),'30,2':mkB(15,36,15,16,37,25),'30,3':mkB(13,32,23,14,33,25),
+'31,0':mkB(115,145,13,116,146,3),'31,1':mkB(46,86,2,47,87,29),'31,2':mkB(15,36,42,16,37,1),'31,3':mkB(13,32,23,14,33,28),
+'32,0':mkB(115,145,17),'32,1':mkB(46,86,10,47,87,23),'32,2':mkB(15,36,10,16,37,35),'32,3':mkB(13,32,19,14,33,35),
+'33,0':mkB(115,145,17,116,146,1),'33,1':mkB(46,86,14,47,87,21),'33,2':mkB(15,36,29,16,37,19),'33,3':mkB(13,32,11,14,33,46),
+'34,0':mkB(115,145,13,116,146,6),'34,1':mkB(46,86,14,47,87,23),'34,2':mkB(16,37,44,17,38,7),'34,3':mkB(13,32,59,14,33,1),
+'35,0':mkB(121,151,12,122,152,7),'35,1':mkB(47,87,12,48,88,26),'35,2':mkB(15,36,39,16,37,14),'35,3':mkB(13,32,22,14,33,41),
+'36,0':mkB(121,151,6,122,152,14),'36,1':mkB(47,87,6,48,88,34),'36,2':mkB(15,36,46,16,37,10),'36,3':mkB(13,32,2,14,33,64),
+'37,0':mkB(122,152,17,123,153,4),'37,1':mkB(46,86,29,47,87,14),'37,2':mkB(15,36,49,16,37,10),'37,3':mkB(13,32,24,14,33,46),
+'38,0':mkB(122,152,4,123,153,18),'38,1':mkB(46,86,13,47,87,32),'38,2':mkB(15,36,48,16,37,14),'38,3':mkB(13,32,42,14,33,32),
+'39,0':mkB(117,147,20,118,148,4),'39,1':mkB(47,87,40,48,88,7),'39,2':mkB(15,36,43,16,37,22),'39,3':mkB(13,32,10,14,33,67),
+'40,0':mkB(118,148,19,119,149,6),'40,1':mkB(47,87,18,48,88,31),'40,2':mkB(15,36,34,16,37,34),'40,3':mkB(13,32,20,14,33,61),
+};
+
+// ========== QR Detection ==========
+function findFinderPatterns(src) {
+  let gray = new cv.Mat();
+  cv.cvtColor(src, gray, src.channels() === 4 ? cv.COLOR_RGBA2GRAY : cv.COLOR_BGR2GRAY);
+  let bin = new cv.Mat();
+  cv.adaptiveThreshold(gray, bin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 51, 10);
+  let contours = new cv.MatVector(), hier = new cv.Mat();
+  cv.findContours(bin, contours, hier, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
+  const hd = hier.data32S;
+
+  function isSquare(c) {
+    const peri = cv.arcLength(c, true);
+    let ap = new cv.Mat(); cv.approxPolyDP(c, ap, 0.04 * peri, true);
+    const ok = ap.rows === 4 && cv.isContourConvex(ap);
+    if (!ok) { ap.delete(); return false; }
+    const r = cv.boundingRect(ap); ap.delete();
+    return r.width > 10 && r.width / r.height > 0.65 && r.width / r.height < 1.35;
+  }
+  function getCorners(c) {
+    const peri = cv.arcLength(c, true);
+    let ap = new cv.Mat(); cv.approxPolyDP(c, ap, 0.04 * peri, true);
+    if (ap.rows !== 4) { ap.delete(); return null; }
+    const pts = [];
+    for (let i = 0; i < 4; i++) pts.push([ap.data32S[i*2], ap.data32S[i*2+1]]);
+    ap.delete();
+    const sums = pts.map(p => p[0]+p[1]), diffs = pts.map(p => p[1]-p[0]);
+    return [pts[sums.indexOf(Math.min(...sums))], pts[diffs.indexOf(Math.min(...diffs))],
+            pts[sums.indexOf(Math.max(...sums))], pts[diffs.indexOf(Math.max(...diffs))]];
+  }
+  function getCenter(c) {
+    const m = cv.moments(c); return m.m00 ? [m.m10/m.m00, m.m01/m.m00] : [0,0];
+  }
+  const dist = (a,b) => Math.hypot(a[0]-b[0], a[1]-b[1]);
+
+  const cands = [];
+  for (let i = 0; i < contours.size(); i++) {
+    const c = contours.get(i);
+    if (!isSquare(c) || cv.contourArea(c) < 500) { c.delete(); continue; }
+    let depth = 0, ch = hd[i*4+2];
+    while (ch !== -1) { depth++; ch = hd[ch*4+2]; }
+    cands.push({center: getCenter(c), area: cv.contourArea(c), corners: getCorners(c), depth});
+    c.delete();
+  }
+
+  const patterns = [], used = new Set();
+  for (let i = 0; i < cands.length; i++) {
+    if (used.has(i)) continue;
+    const grp = [cands[i]]; used.add(i);
+    for (let j = 0; j < cands.length; j++)
+      if (!used.has(j) && dist(cands[i].center, cands[j].center) < 20) { grp.push(cands[j]); used.add(j); }
+    if (grp.length >= 2) {
+      const areas = grp.map(g=>g.area).sort((a,b)=>b-a);
+      if (areas[0]/areas[areas.length-1] > 2 && areas[0]/areas[areas.length-1] < 25)
+        patterns.push(grp.reduce((a,b) => a.area > b.area ? a : b));
+    }
+  }
+  const final = [];
+  for (const p of [...patterns].sort((a,b)=>b.area-a.area))
+    if (!final.some(f => dist(p.center, f.center) < 30)) final.push(p);
+
+  gray.delete(); bin.delete(); contours.delete(); hier.delete();
+  return final;
+}
+
+function identifyCorners(pats) {
+  const c = pats.map(p=>p.center);
+  let maxD=0, diag=[0,1];
+  for(let i=0;i<3;i++) for(let j=i+1;j<3;j++){
+    const d=(c[i][0]-c[j][0])**2+(c[i][1]-c[j][1])**2;
+    if(d>maxD){maxD=d;diag=[i,j];}
+  }
+  const ti=3-diag[0]-diag[1], p1=pats[diag[0]], p2=pats[diag[1]], ct=pats[ti].center;
+  const v1=[p1.center[0]-ct[0],p1.center[1]-ct[1]], v2=[p2.center[0]-ct[0],p2.center[1]-ct[1]];
+  return v1[0]*v2[1]-v1[1]*v2[0] > 0 ? [pats[ti],p1,p2] : [pats[ti],p2,p1];
+}
+
+function groupFinderPatterns(pats) {
+  if (pats.length < 3) return [];
+  const result = [];
+  for (let i=0;i<pats.length;i++) for(let j=i+1;j<pats.length;j++) for(let k=j+1;k<pats.length;k++){
+    const cs = [pats[i].center, pats[j].center, pats[k].center];
+    let valid = false;
+    for (let a=0;a<3;a++){
+      const ot = cs.filter((_,b)=>b!==a);
+      const v1=[ot[0][0]-cs[a][0],ot[0][1]-cs[a][1]], v2=[ot[1][0]-cs[a][0],ot[1][1]-cs[a][1]];
+      const l1=Math.hypot(...v1), l2=Math.hypot(...v2);
+      if(!l1||!l2) continue;
+      const ang = Math.acos(Math.max(-1,Math.min(1,(v1[0]*v2[0]+v1[1]*v2[1])/(l1*l2))))*180/Math.PI;
+      if(ang>60&&ang<120&&Math.max(l1,l2)/Math.min(l1,l2)<3){valid=true;break;}
+    }
+    if(!valid) continue;
+    const sz=[Math.sqrt(pats[i].area),Math.sqrt(pats[j].area),Math.sqrt(pats[k].area)];
+    if(Math.max(...sz)/Math.min(...sz)>=4) continue;
+    try{result.push(identifyCorners([pats[i],pats[j],pats[k]]));}catch(e){}
+  }
+  return result;
+}
+
+// ========== Homography & Corners ==========
+function getQRCorners(tl, tr, bl, version, src) {
+  const size = version * 4 + 17;
+  const tc=tl.corners, rc=tr.corners, bc=bl.corners;
+  if (!tc||!rc||!bc) return _fallbackCorners(tl,tr,bl,size);
+
+  const ip=[], mp=[];
+  for(let i=0;i<4;i++){ip.push(tc[i][0],tc[i][1]);}
+  mp.push(0,0, 7,0, 7,7, 0,7);
+  for(let i=0;i<4;i++){ip.push(rc[i][0],rc[i][1]);}
+  mp.push(size-7,0, size,0, size,7, size-7,7);
+  for(let i=0;i<4;i++){ip.push(bc[i][0],bc[i][1]);}
+  mp.push(0,size-7, 7,size-7, 7,size, 0,size);
+
+  let imgM=cv.matFromArray(12,1,cv.CV_32FC2,ip);
+  let modM=cv.matFromArray(12,1,cv.CV_32FC2,mp);
+  let H=cv.findHomography(modM,imgM,cv.RANSAC,3.0);
+  imgM.delete(); modM.delete();
+
+  if(!H||H.empty()){if(H)H.delete(); return _fallbackCorners(tl,tr,bl,size);}
+
+  // Alignment pattern refinement
+  if(version>=2 && src && AP_POS[version]){
+    const pos=AP_POS[version], ap=pos[pos.length-1];
+    let ptM=cv.matFromArray(1,1,cv.CV_32FC2,[ap,ap]);
+    let ptI=new cv.Mat(); cv.perspectiveTransform(ptM,ptI,H);
+    const px=ptI.data32F[0], py=ptI.data32F[1];
+    ptM.delete(); ptI.delete();
+
+    let gray=new cv.Mat();
+    cv.cvtColor(src,gray,src.channels()===4?cv.COLOR_RGBA2GRAY:cv.COLOR_BGR2GRAY);
+    const ms=Math.max(3,Math.round(Math.sqrt(tl.area)/7));
+    const found=_findAlignment(gray,px,py,ms);
+    gray.delete();
+
+    if(found){
+      const ip2=[...ip,found[0],found[1]], mp2=[...mp,ap,ap];
+      let iM2=cv.matFromArray(13,1,cv.CV_32FC2,ip2);
+      let mM2=cv.matFromArray(13,1,cv.CV_32FC2,mp2);
+      let H2=cv.findHomography(mM2,iM2,cv.RANSAC,3.0);
+      iM2.delete(); mM2.delete();
+      if(H2&&!H2.empty()){H.delete();H=H2;}else if(H2)H2.delete();
+    }
+  }
+
+  let oM=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,size,0,size,size,0,size]);
+  let oI=new cv.Mat(); cv.perspectiveTransform(oM,oI,H);
+  const corners=[];
+  for(let i=0;i<4;i++) corners.push([oI.data32F[i*2],oI.data32F[i*2+1]]);
+  oM.delete(); oI.delete(); H.delete();
+  return corners;
+}
+
+function _findAlignment(gray,px,py,ms){
+  const ts=ms*5, rad=ms*5;
+  const h=gray.rows, w=gray.cols;
+  const x0=Math.max(0,Math.round(px)-rad), y0=Math.max(0,Math.round(py)-rad);
+  const x1=Math.min(w,Math.round(px)+rad), y1=Math.min(h,Math.round(py)+rad);
+  if(x1-x0<ts||y1-y0<ts) return null;
+
+  let tpl=new cv.Mat(ts,ts,cv.CV_8UC1,new cv.Scalar(0));
+  let r1=tpl.roi(new cv.Rect(ms,ms,ms*3,ms*3)); r1.setTo(new cv.Scalar(255)); r1.delete();
+  let r2=tpl.roi(new cv.Rect(ms*2,ms*2,ms,ms)); r2.setTo(new cv.Scalar(0)); r2.delete();
+
+  let roi=gray.roi(new cv.Rect(x0,y0,x1-x0,y1-y0));
+  let res=new cv.Mat();
+  cv.matchTemplate(roi,tpl,res,cv.TM_CCOEFF_NORMED);
+  const mm=cv.minMaxLoc(res);
+  tpl.delete(); roi.delete(); res.delete();
+  if(mm.maxVal<0.5) return null;
+  return [x0+mm.maxLoc.x+ts/2, y0+mm.maxLoc.y+ts/2];
+}
+
+function _fallbackCorners(tl,tr,bl,size){
+  const tc=tl.center, rc=tr.center, bc=bl.center;
+  const vt=[rc[0]-tc[0],rc[1]-tc[1]], vb=[bc[0]-tc[0],bc[1]-tc[1]];
+  const br=[tc[0]+vt[0]+vb[0],tc[1]+vt[1]+vb[1]];
+  const lt=Math.hypot(...vt), lb=Math.hypot(...vb);
+  const mh=lt/(size-7), mv=lb/(size-7);
+  const ut=[vt[0]/lt,vt[1]/lt], ub=[vb[0]/lb,vb[1]/lb];
+  const o=3.5;
+  return [
+    [tc[0]-o*mh*ut[0]-o*mv*ub[0], tc[1]-o*mh*ut[1]-o*mv*ub[1]],
+    [rc[0]+o*mh*ut[0]-o*mv*ub[0], rc[1]+o*mh*ut[1]-o*mv*ub[1]],
+    [br[0]+o*mh*ut[0]+o*mv*ub[0], br[1]+o*mh*ut[1]+o*mv*ub[1]],
+    [bc[0]-o*mh*ut[0]+o*mv*ub[0], bc[1]-o*mh*ut[1]+o*mv*ub[1]],
+  ];
+}
+
+// ========== Sampling ==========
+function sampleMatrix(src, corners, version) {
+  const size=version*4+17, ws=size*10;
+  let gray=new cv.Mat();
+  cv.cvtColor(src,gray,src.channels()===4?cv.COLOR_RGBA2GRAY:cv.COLOR_BGR2GRAY);
+  let sP=cv.matFromArray(4,1,cv.CV_32FC2,corners.flat());
+  let dP=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,ws,0,ws,ws,0,ws]);
+  let M=cv.getPerspectiveTransform(sP,dP);
+  let warped=new cv.Mat(); cv.warpPerspective(gray,warped,M,new cv.Size(ws,ws));
+  let bin=new cv.Mat(); cv.threshold(warped,bin,0,255,cv.THRESH_BINARY+cv.THRESH_OTSU);
+  const bd=bin.data;
+
+  const FINDER=[[1,1,1,1,1,1,1],[1,0,0,0,0,0,1],[1,0,1,1,1,0,1],[1,0,1,1,1,0,1],
+                [1,0,1,1,1,0,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]];
+
+  function sample(ox,oy,ms){
+    const m=[];
+    for(let r=0;r<size;r++){const row=[];const y=Math.min(ws-1,Math.max(0,Math.round(oy+(r+.5)*ms)));
+      for(let c=0;c<size;c++){const x=Math.min(ws-1,Math.max(0,Math.round(ox+(c+.5)*ms)));
+        row.push(bd[y*ws+x]<128?1:0);}m.push(row);}return m;
+  }
+  function score(m){
+    let s=0;
+    for(let r=0;r<7;r++)for(let c=0;c<7;c++){
+      if(m[r][c]===FINDER[r][c])s++;
+      if(m[r][size-7+c]===FINDER[r][c])s++;
+      if(m[size-7+r][c]===FINDER[r][c])s++;
+    }
+    for(let i=8;i<size-8;i++){if(m[6][i]===(i%2===0?1:0))s++;if(m[i][6]===(i%2===0?1:0))s++;}
+    return s;
+  }
+  const idealMs=ws/size;
+  const pen=(ox,oy,ms)=>(Math.abs(ox)+Math.abs(oy)+Math.abs(ms-idealMs)*10)*0.001;
+
+  let best=null,bestS=-1,bestP=[0,0,idealMs];
+  for(let ox=-5;ox<5;ox+=0.5)for(let oy=-5;oy<5;oy+=0.5)for(let ms=9.6;ms<10.4;ms+=0.1){
+    const m=sample(ox,oy,ms), s=score(m)-pen(ox,oy,ms);
+    if(s>bestS){best=m;bestS=s;bestP=[ox,oy,ms];}
+  }
+  const[bx,by,bm]=bestP;
+  for(let dx=-0.5;dx<=0.5;dx+=0.2)for(let dy=-0.5;dy<=0.5;dy+=0.2)for(let dm=-0.15;dm<=0.15;dm+=0.05){
+    const ox=bx+dx,oy=by+dy,ms=bm+dm;
+    const m=sample(ox,oy,ms),s=score(m)-pen(ox,oy,ms);
+    if(s>bestS){best=m;bestS=s;bestP=[ox,oy,ms];}
+  }
+
+  gray.delete();sP.delete();dP.delete();M.delete();warped.delete();bin.delete();
+  return best;
+}
+
+// ========== QR Decoding ==========
+function readFormatInfo(matrix) {
+  const bits=[];
+  for(const c of[0,1,2,3,4,5,7,8])bits.push(matrix[8][c]);
+  for(const r of[7,5,4,3,2,1,0])bits.push(matrix[r][8]);
+  let v=0;for(let i=0;i<15;i++)v|=bits[i]<<(14-i);
+  v^=0b101010000010010;
+  return [(v>>13)&3,(v>>10)&7];
+}
+
+function isDataModule(r,c,size){
+  if(r<=8&&c<=8)return false;
+  if(r<=8&&c>=size-8)return false;
+  if(r>=size-8&&c<=8)return false;
+  if(r===6||c===6)return false;
+  if(r===8&&(c<=8||c>=size-8))return false;
+  if(c===8&&(r<=8||r>=size-7))return false;
+  if(r===size-8&&c===8)return false;
+  const ver=(size-17)/4;
+  if(ver>=7){if(r<6&&c>=size-11&&c<size-8)return false;if(c<6&&r>=size-11&&r<size-8)return false;}
+  if(ver>=2&&AP_POS[ver]){
+    for(const ar of AP_POS[ver])for(const ac of AP_POS[ver]){
+      if(ar<=8&&ac<=8)continue;if(ar<=8&&ac>=size-9)continue;if(ar>=size-9&&ac<=8)continue;
+      if(Math.abs(r-ar)<=2&&Math.abs(c-ac)<=2)return false;
+    }
+  }
+  return true;
+}
+
+function unmaskMatrix(matrix,mask){
+  const size=matrix.length, r=matrix.map(row=>[...row]);
+  const fn=[(r,c)=>(r+c)%2===0,r=>r%2===0,(_,c)=>c%3===0,(r,c)=>(r+c)%3===0,
+    (r,c)=>(~~(r/2)+~~(c/3))%2===0,(r,c)=>(r*c)%2+(r*c)%3===0,
+    (r,c)=>((r*c)%2+(r*c)%3)%2===0,(r,c)=>((r+c)%2+(r*c)%3)%2===0][mask];
+  for(let i=0;i<size;i++)for(let j=0;j<size;j++)
+    if(isDataModule(i,j,size)&&fn(i,j))r[i][j]=1-r[i][j];
+  return r;
+}
+
+function readCodewords(matrix){
+  const size=matrix.length, bits=[];
+  let col=size-1, up=true;
+  while(col>=0){
+    if(col===6){col--;continue;}
+    const rows=up?Array.from({length:size},(_,i)=>size-1-i):Array.from({length:size},(_,i)=>i);
+    for(const row of rows){
+      if(isDataModule(row,col,size))bits.push(matrix[row][col]);
+      if(col>0&&isDataModule(row,col-1,size))bits.push(matrix[row][col-1]);
+    }
+    col-=2;up=!up;
+  }
+  const cw=[];
+  for(let i=0;i+7<bits.length;i+=8){let v=0;for(let j=0;j<8;j++)v|=bits[i+j]<<(7-j);cw.push(v);}
+  return cw;
+}
+
+function decodeData(codewords, version, ecLevel) {
+  const ecT=[1,0,3,2][ecLevel];
+  const blocks=BLOCKS[`${version},${ecT}`];
+  if(!blocks)throw new Error(`Unsupported v${version}/ec${ecT}`);
+
+  const bData=blocks.map(()=>[]), bEc=blocks.map(()=>[]);
+  let idx=0;
+  const maxD=Math.max(...blocks.map(b=>b[0])), ecLen=blocks[0][1]-blocks[0][0];
+  for(let col=0;col<maxD;col++)for(let i=0;i<blocks.length;i++)
+    if(col<blocks[i][0]&&idx<codewords.length)bData[i].push(codewords[idx++]);
+  for(let col=0;col<ecLen;col++)for(let i=0;i<blocks.length;i++)
+    if(idx<codewords.length)bEc[i].push(codewords[idx++]);
+
+  const rs=new ReedSolomon(ecLen), data=[];
+  for(let i=0;i<blocks.length;i++){
+    const raw=[...bData[i],...bEc[i]];
+    try{data.push(...rs.decode(raw));}catch(e){data.push(...bData[i]);}
+  }
+
+  const bits=[];for(const b of data)for(let i=7;i>=0;i--)bits.push((b>>i)&1);
+  const rb=(p,n)=>{let v=0;for(let i=0;i<n;i++)v=(v<<1)|bits[p+i];return[v,p+n];};
+  const cb=(mode,ver)=>{
+    if(ver<=9)return{1:10,2:9,4:8,8:8}[mode]||8;
+    if(ver<=26)return{1:12,2:11,4:16,8:10}[mode]||16;
+    return{1:14,2:13,4:16,8:12}[mode]||16;
+  };
+  const AL="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+  let result="",pos=0;
+  while(pos<bits.length-4){
+    let mode;[mode,pos]=rb(pos,4);if(mode===0)break;
+    let count;[count,pos]=rb(pos,cb(mode,version));
+    if(mode===1){
+      while(count>=3){let v;[v,pos]=rb(pos,10);result+=String(v).padStart(3,'0');count-=3;}
+      if(count===2){let v;[v,pos]=rb(pos,7);result+=String(v).padStart(2,'0');}
+      else if(count===1){let v;[v,pos]=rb(pos,4);result+=String(v);}
+    }else if(mode===2){
+      while(count>=2){let v;[v,pos]=rb(pos,11);result+=AL[~~(v/45)]+AL[v%45];count-=2;}
+      if(count===1){let v;[v,pos]=rb(pos,6);result+=AL[v];}
+    }else if(mode===4){
+      const ch=[];for(let i=0;i<count;i++){let v;[v,pos]=rb(pos,8);ch.push(v);}
+      result+=new TextDecoder('utf-8').decode(new Uint8Array(ch));
+    }else if(mode===7){let eci;[eci,pos]=rb(pos,8);
+    }else break;
+  }
+  return result;
+}
+
+// ========== Main Pipeline ==========
+function decodeQR(src) {
+  const patterns = findFinderPatterns(src);
+  if (patterns.length < 3) throw new Error(`Found ${patterns.length} patterns, need 3`);
+  const groups = groupFinderPatterns(patterns);
+  let lastErr = "No valid pattern groups";
+  for (const [tl, tr, bl] of groups) {
+    try {
+      const dist = Math.hypot(tl.center[0]-tr.center[0], tl.center[1]-tr.center[1]);
+      const ms = Math.sqrt(tl.area) / 7;
+      const version = Math.max(1, Math.min(40, Math.round(((dist/ms+7)-17)/4)));
+      const corners = getQRCorners(tl, tr, bl, version, src);
+      const matrix = sampleMatrix(src, corners, version);
+      const size = version * 4 + 17;
+      const FINDER=[[1,1,1,1,1,1,1],[1,0,0,0,0,0,1],[1,0,1,1,1,0,1],[1,0,1,1,1,0,1],
+                    [1,0,1,1,1,0,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]];
+      let fs=0;
+      for(let r=0;r<7;r++)for(let c=0;c<7;c++){
+        if(matrix[r][c]===FINDER[r][c])fs++;
+        if(matrix[r][size-7+c]===FINDER[r][c])fs++;
+        if(matrix[size-7+r][c]===FINDER[r][c])fs++;
+      }
+      if (fs < 100) continue;
+      const [ecLevel, mask] = readFormatInfo(matrix);
+      const unmasked = unmaskMatrix(matrix, mask);
+      const codewords = readCodewords(unmasked);
+      const result = decodeData(codewords, version, ecLevel);
+      if (result && result.length > 0) return result;
+    } catch(e) { lastErr = e.message; continue; }
+  }
+  throw new Error(lastErr);
+}
+
+// ========== Camera & UI ==========
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+(async function startCamera(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {facingMode:'environment', width:{ideal:1280}, height:{ideal:720}}
+    });
+    video.srcObject = stream;
+  } catch(e) {
+    document.getElementById('status').textContent = 'No camera. Use file upload.';
+  }
+})();
+
+function scan() {
+  if (!cvReady) return;
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.drawImage(video, 0, 0);
+  processCanvas();
+}
+
+function handleFile(e) {
+  if (!cvReady || !e.target.files[0]) return;
+  const img = new Image();
+  img.onload = () => {
+    canvas.width = img.width; canvas.height = img.height;
+    ctx.drawImage(img, 0, 0);
+    processCanvas();
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(e.target.files[0]);
+}
+
+function processCanvas() {
+  const st = document.getElementById('status');
+  const rb = document.getElementById('result-box');
+  const re = document.getElementById('result');
+  st.textContent = 'Scanning...';
+  rb.style.display = 'none';
+  setTimeout(() => {
+    try {
+      let src = cv.imread(canvas);
+      const text = decodeQR(src);
+      src.delete();
+      rb.style.display = 'block';
+      if (/^https?:\/\//i.test(text))
+        re.innerHTML = `<a href="${text}" target="_blank">${text}</a>`;
+      else re.textContent = text;
+      st.textContent = 'Decoded!';
+    } catch(e) {
+      st.textContent = 'Error: ' + e.message;
+    }
+  }, 50);
+}
+
+function copyResult() {
+  const text = document.getElementById('result').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    document.getElementById('copy-btn').textContent = 'Copied!';
+    setTimeout(() => document.getElementById('copy-btn').textContent = 'Copy', 1500);
+  });
+}
+</script>
+</body>
+</html>
